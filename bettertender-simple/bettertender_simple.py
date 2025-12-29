@@ -5,18 +5,26 @@ import hashlib
 import os
 from enum import Enum
 
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.responses import FileResponse
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 from pydantic import BaseModel, EmailStr, ConfigDict
 from sqlalchemy import (
-    create_engine, Column, Integer, String, Text, Boolean,
-    DateTime, Enum as SAEnum, ForeignKey, JSON
+    create_engine,
+    Column,
+    Integer,
+    String,
+    Text,
+    Boolean,
+    DateTime,
+    Enum as SAEnum,
+    ForeignKey,
+    JSON,
+    Float,
 )
-from sqlalchemy.orm import declarative_base, sessionmaker, Session
-
+from sqlalchemy.orm import sessionmaker, declarative_base, relationship, Session
 # ------------ Basic config ------------
 
 DATABASE_URL = "sqlite:///./bettertender_simple.db"
@@ -113,34 +121,48 @@ class Tender(Base):
     close_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
-
 class Submission(Base):
     __tablename__ = "submissions"
 
     id = Column(Integer, primary_key=True, index=True)
-    tender_id = Column(Integer, ForeignKey("tenders.id"), nullable=False, index=True)
-    bidder_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
-    is_anonymous = Column(Boolean, nullable=False, default=False)
-    anonymous_commitment = Column(String(128), nullable=True)
-    anonymous_nonce_hint = Column(String(64), nullable=True)
-    encrypted_payload = Column(Text, nullable=True)
-    amount = Column(Integer, nullable=True)
-    notes = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    tender_id = Column(Integer, ForeignKey("tenders.id"), nullable=False)
+    bidder_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # null if anonymous
+    is_anonymous = Column(Boolean, default=False, nullable=False)
+    amount = Column(Float, nullable=True)
+    notes = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    # supplier info
+    company_name = Column(String, nullable=True)
+    bbbee_level = Column(String, nullable=True)
+    years_in_service = Column(Integer, nullable=True)
+    tax_number = Column(String, nullable=True)
+    csd_number = Column(String, nullable=True)
+
+    bidder = relationship("User")
+    tender = relationship("Tender", backref="submissions")
+
+from pathlib import Path
+import os
+
+BASE_DIR = Path(__file__).resolve().parent
+UPLOAD_DIR = BASE_DIR / "uploads"
+UPLOAD_DIR.mkdir(exist_ok=True)
 
 
 class Document(Base):
     __tablename__ = "documents"
 
     id = Column(Integer, primary_key=True, index=True)
-    owner_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
-    tender_id = Column(Integer, ForeignKey("tenders.id"), nullable=True, index=True)
-    original_filename = Column(String(255), nullable=False)
-    stored_path = Column(Text, nullable=False)
-    mime_type = Column(String(100), nullable=True)
-    checksum = Column(String(64), nullable=True)
-    visibility = Column(String(32), nullable=False, default="internal")
-    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    tender_id = Column(Integer, ForeignKey("tenders.id"), nullable=True)
+    filename = Column(String, nullable=False)
+    storage_path = Column(String, nullable=False)
+    visibility = Column(String, default="internal", nullable=False)  # public/internal/restricted
+    uploaded_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    owner = relationship("User", backref="documents")
+    tender = relationship("Tender", backref="documents")
 
 
 class AuditLog(Base):
@@ -353,10 +375,10 @@ app = FastAPI(
     description="Single-file version of BetterTender backend (auth, tenders, submissions, documents, audit).",
 )
 
-# CORS so frontend (e.g. Next.js on localhost:3000) can call this API
+# CORS so frontend can call this API (allowing all origins for deployment)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -398,7 +420,14 @@ def on_startup():
                 role=UserRole.bidder.value,
             )
 
-            db.add_all([admin, issuer, bidder])
+            auditor = User(
+                email="auditor@sasweb.gov",
+                full_name="SASWEB Auditor",
+                hashed_password=hash_password(dev_password),
+                role=UserRole.auditor.value,
+            )
+
+            db.add_all([admin, issuer, bidder, auditor])
             db.commit()
     finally:
         db.close()
